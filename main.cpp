@@ -1,12 +1,46 @@
+#include <algorithm>
+#include <iterator>
+#include <utility>
 #include "cv.h"
 #include "highgui.h"
 
 using namespace std;
 using namespace cv;
 
+int fps = 15;
+
+bool add_black_frames(vector<Mat>& frames)
+{
+  Mat black(frames[0].size(), CV_8UC3, Scalar(0,0,0));
+  for (int k = 0; k < fps; k++) {
+    frames.push_back(black);
+  }
+}
+
+bool blend(vector<Mat>& frames)
+{
+  vector<Mat> frames0;
+  frames0.reserve(frames.size() + 2);
+  Mat black(frames[0].size(), CV_8UC3, Scalar(0,0,0));
+  frames0.push_back(black);
+  for (vector<Mat>::iterator it = frames.begin();
+       it != frames.end();
+       it = frames.erase(it)) {
+    frames0.push_back(*it);
+  }
+  frames0.push_back(black);
+  for (int i = 1; i < frames0.size(); i++) {
+    for (int k = 0; k < 20; k++) {
+      float alpha = k / 20.0;
+      Mat frame;
+      addWeighted(frames0[i], alpha, frames0[i - 1], 1.0 - alpha, 0.0, frame);
+      frames.push_back(frame);
+    }
+  }
+}
+
 int main(int argc, char** argv)
 {
-  int fps = 15;
   vector<Mat> frames;
   Size size(800, 600);
 
@@ -22,38 +56,22 @@ int main(int argc, char** argv)
     frames.push_back(frame);
   }
 
-  // blend
-  Mat blackFrame(size, CV_8UC3, Scalar(0,0,0));
-  frames.insert(frames.begin(), blackFrame);
-  frames.push_back(blackFrame);
-  vector<Mat> frames2;
-  for (int i = 1; i < frames.size(); i++) {
-    for (int k = 0; k < 20; k++) {
-      float alpha = k / 20.0;
-      Mat frame;
-      addWeighted(frames[i], alpha, frames[i - 1], 1.0 - alpha, 0.0, frame);
-      frames2.push_back(frame);
-    }
-  }
-
-  // add black frames
-  for (int i = 1; i < fps; i++) {
-    frames2.push_back(blackFrame);
-  }
+  blend(frames);
+  add_black_frames(frames);
 
   namedWindow("output", WINDOW_AUTOSIZE);
-  int it = 0; // TODO iterator
-  cout << "Looping " << frames2.size() << " frames" << endl;
+  int i = 0; // TODO iterator
+  cout << "Looping " << frames.size() << " frames" << endl;
 
   // show output
   while (true) {
-    imshow("output", frames2[it]);
+    imshow("output", frames[i]);
     if (waitKey(1000 / fps) >= 0) {
       break;
     }
-    it++;
-    if (it >= frames2.size()) {
-      it = 0;
+    i++;
+    if (i >= frames.size()) {
+      i = 0;
     }
   }
   return 0;
