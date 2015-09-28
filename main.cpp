@@ -13,6 +13,7 @@ using namespace std;
 using namespace cv;
 
 int fps = 15;
+int hold = 1; // sec
 
 bool add_black_frames(vector<Mat>& frames)
 {
@@ -40,6 +41,9 @@ bool blend_frames(vector<Mat>& frames)
       Mat frame;
       addWeighted(frames0[i], alpha, frames0[i - 1], 1.0 - alpha, 0.0, frame);
       frames.push_back(frame);
+    }
+    for (int j = 1; j < fps * hold; j++) {
+      frames.push_back(frames0[i]);
     }
   }
 }
@@ -135,7 +139,7 @@ frames.push_back(frame);
 int main(int argc, char** argv)
 {
   vector<Mat> frames;
-  Size size(800, 600);
+  Size size(1920, 1280);
 
   // read input
   for (int i = 1; i < argc; i++) {
@@ -168,5 +172,13 @@ int main(int argc, char** argv)
       i = 0;
     }
   }
+
+  VideoWriter video("out.avi", CV_FOURCC('X','V','I','D'), fps, size, true);
+  for (vector<Mat>::iterator it = frames.begin();
+       it != frames.end();
+       it = frames.erase(it)) {
+    video.write(*it);
+  }
+
   return 0;
 }
