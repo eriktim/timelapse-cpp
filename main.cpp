@@ -51,24 +51,28 @@ bool blend_frames(vector<Mat>& frames)
 bool stabilize_frames(vector<Mat>& frames)
 {
   vector<Mat> frames0; // TODO method
+  vector<Mat> grayscales;
   frames0.reserve(frames.size());
   for (vector<Mat>::iterator it = frames.begin();
        it != frames.end();
        it = frames.erase(it)) {
     frames0.push_back(*it);
+    Mat gray;
+    cvtColor(*it, gray, CV_BGR2GRAY);
+    grayscales.push_back(gray);
   }
   SurfFeatureDetector detector(400);
   SurfDescriptorExtractor extractor;
 Mat T = Mat::eye(3, 3, CV_64F);
 frames.push_back(frames0[0]);
   for (int ii = 1; ii < frames0.size(); ii++) {
-    Mat img_object = frames0[ii];
-    Mat img_scene = frames0[ii - 1];
+    Mat img_object = grayscales[ii];
+    Mat img_scene = grayscales[ii-1];
 ////////////////////
 //-- Step 1: Detect the keypoints using SURF Detector
   int minHessian = 400;
 
-  SurfFeatureDetector detector( minHessian , 2, 4, true, true ); // ???
+  SurfFeatureDetector detector( minHessian , 8, 3, true, true ); // ???
 
   std::vector<KeyPoint> keypoints_object, keypoints_scene;
 
@@ -103,9 +107,10 @@ frames.push_back(frames0[0]);
   //-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
   std::vector< DMatch > good_matches;
 
-  for( int i = 0; i < descriptors_object.rows; i++ )
-  { if( matches[i].distance < 3*min_dist )
-     { good_matches.push_back( matches[i]); }
+  for( int i = 0; i < descriptors_object.rows; i++ ) { 
+    if( matches[i].distance < 3*min_dist ) {
+      good_matches.push_back( matches[i]);
+    }
   }
 
   Mat img_matches;
@@ -124,11 +129,16 @@ frames.push_back(frames0[0]);
     scene.push_back( keypoints_scene[ good_matches[i].trainIdx ].pt );
   }
 
-  Mat H = findHomography( obj, scene, CV_RANSAC );
+  Mat H = findHomography( obj, scene, CV_RANSAC , 2);
   T = T * H;
+  //T = H;
 
   Mat frame;
   warpPerspective( frames0[ii] , frame, T, frames0[ii].size());
+  // write stabilized frames
+  ostringstream oss;
+  oss << "/tmp/timelapse/" << ii << ".jpg";
+  imwrite(oss.str(), frame); 
 
 ////////////////////
 //frames.push_back(img_matches);
@@ -139,7 +149,8 @@ frames.push_back(frame);
 int main(int argc, char** argv)
 {
   vector<Mat> frames;
-  Size size(1920, 1280);
+  int lines = 720;
+  Size size;
 
   // read input
   for (int i = 1; i < argc; i++) {
@@ -147,6 +158,13 @@ int main(int argc, char** argv)
     if (!image.data) {
       cerr << "Ignoring image " << i << endl;
       continue;
+    }
+    if (i == 1) {
+      Size orgSize = image.size();
+      float ratio = orgSize.width / 1.0 / orgSize.height;
+      size = Size(lines * ratio, lines);
+      cout << "Input size: " << orgSize << endl;
+      cout << "Output size: " << size << endl;
     }
     Mat frame;
     resize(image, frame, size);
@@ -173,12 +191,14 @@ int main(int argc, char** argv)
     }
   }
 
+  /*
+  // write output
   VideoWriter video("out.avi", CV_FOURCC('X','V','I','D'), fps, size, true);
   for (vector<Mat>::iterator it = frames.begin();
        it != frames.end();
        it = frames.erase(it)) {
     video.write(*it);
-  }
+  }*/
 
   return 0;
 }
