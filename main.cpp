@@ -63,11 +63,11 @@ bool stabilize_frames(vector<Mat>& frames)
   }
   SurfFeatureDetector detector(400);
   SurfDescriptorExtractor extractor;
-Mat T = Mat::eye(3, 3, CV_64F);
 frames.push_back(frames0[0]);
   for (int ii = 1; ii < frames0.size(); ii++) {
     Mat img_object = grayscales[ii];
-    Mat img_scene = grayscales[ii-1];
+    Mat img_scene;
+    cvtColor(frames[ii - 1], img_scene, CV_BGR2GRAY);
 ////////////////////
 //-- Step 1: Detect the keypoints using SURF Detector
   int minHessian = 400;
@@ -101,8 +101,8 @@ frames.push_back(frames0[0]);
     if( dist > max_dist ) max_dist = dist;
   }
 
-  printf("-- Max dist : %f \n", max_dist );
-  printf("-- Min dist : %f \n", min_dist );
+  //printf("-- Max dist : %f \n", max_dist );
+  //printf("-- Min dist : %f \n", min_dist );
 
   //-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
   std::vector< DMatch > good_matches;
@@ -130,11 +130,18 @@ frames.push_back(frames0[0]);
   }
 
   Mat H = findHomography( obj, scene, CV_RANSAC , 2);
-  T = T * H;
-  //T = H;
+  //Mat H = estimateRigidTransform(obj, scene, 0);
+  cout << H << endl;
+
+  double det = H.at<double>(0,0) * H.at<double>(1,1) - H.at<double>(1,0) * H.at<double>(0,1);
+  double theta = 3.0;
+  if (fabs(det) > theta || theta * fabs(det) < 1.0) {
+    cout << "Singular matrix!" << endl;
+  }
 
   Mat frame;
-  warpPerspective( frames0[ii] , frame, T, frames0[ii].size());
+  warpPerspective( frames0[ii] , frame, H, frames0[ii].size(), INTER_CUBIC);
+  //warpAffine(frames0[ii] , frame, H, frames0[ii].size(), INTER_CUBIC);
   // write stabilized frames
   ostringstream oss;
   oss << "/tmp/timelapse/" << ii << ".jpg";
