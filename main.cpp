@@ -14,12 +14,34 @@ using namespace cv;
 
 int fps = 15;
 int hold = 1; // sec
+double crop = 0.1;
 
 bool add_black_frames(vector<Mat>& frames)
 {
   Mat black(frames[0].size(), CV_8UC3, Scalar(0,0,0));
   for (int k = 0; k < fps; k++) {
     frames.push_back(black);
+  }
+}
+
+bool crop_frames(vector<Mat>& frames)
+{
+  vector<Mat> frames0; // TODO method
+  frames0.reserve(frames.size());
+  for (vector<Mat>::iterator it = frames.begin();
+       it != frames.end();
+       it = frames.erase(it)) {
+    frames0.push_back(*it);
+  }
+  Size size = frames0[0].size();
+  int dx = crop * size.width;
+  int dy = crop * size.height;
+  Rect roi(dx, dy, size.width - dx, size.height - dy);
+  for (vector<Mat>::iterator it = frames0.begin();
+       it != frames0.end();
+       it++) {
+    Mat frame = *it;
+    frames.push_back(frame(roi));
   }
 }
 
@@ -45,6 +67,51 @@ bool blend_frames(vector<Mat>& frames)
     for (int j = 1; j < fps * hold; j++) {
       frames.push_back(frames0[i]);
     }
+  }
+}
+
+void normalize_frames(vector<Mat>& frames)
+{
+  vector<Mat> frames0; // TODO method
+  frames0.reserve(frames.size());
+  for (vector<Mat>::iterator it = frames.begin();
+       it != frames.end();
+       it = frames.erase(it)) {
+    frames0.push_back(*it);
+  }
+
+    vector<Scalar> deflickerBufferMean(frames.size());
+    vector<Scalar> deflickerBufferStd(frames.size());
+    
+  for (int ii = 0; ii < frames0.size(); ii++) {
+    meanStdDev(frames0[ii], deflickerBufferMean[ii], deflickerBufferStd[ii]);
+
+    Scalar evCorrection;
+    Scalar contrastCorrection;
+
+    Scalar bufferAvg = 0;
+    Scalar bufferStdAvg = 0;
+
+    for(int i = 0; i < frames0.size(); i++) {
+       bufferAvg += deflickerBufferMean[i]/Scalar(frames0.size());
+       bufferStdAvg += deflickerBufferStd[i]/Scalar(frames0.size());
+    }
+
+    Mat doubleImg;
+    frames0[ii].convertTo(doubleImg, CV_64FC3);
+    vector<Mat> channels;
+    split(doubleImg, channels);
+
+    for(int ch = 0; ch < frames0[ii].channels(); ch++)
+    {
+        channels[ch] = ((channels[ch] - deflickerBufferMean[ii][ch])/deflickerBufferStd[ii][ch])
+                * contrastCorrection[ch] + evCorrection[ch];
+    }
+    merge(channels, doubleImg);
+
+    Mat frame;
+    doubleImg.convertTo(frame, CV_8UC3);
+    frames.push_back(frame);
   }
 }
 
@@ -117,6 +184,9 @@ frames.push_back(frames0[0]);
   drawMatches( img_object, keypoints_object, img_scene, keypoints_scene,
                good_matches, img_matches, Scalar::all(-1), Scalar::all(-1),
                vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS );
+  ostringstream oss1;
+  oss1 << "/tmp/timelapse/mat_" << ii << ".jpg";
+  imwrite(oss1.str(), img_matches); 
 
   //-- Localize the object
   std::vector<Point2f> obj;
@@ -172,15 +242,19 @@ int main(int argc, char** argv)
       size = Size(lines * ratio, lines);
       cout << "Input size: " << orgSize << endl;
       cout << "Output size: " << size << endl;
+      size.width = (1.0 + crop) * size.width;
+      size.height = (1.0 + crop) * size.height;
     }
     Mat frame;
     resize(image, frame, size);
     frames.push_back(frame);
   }
 
+  //normalize_frames(frames);
   stabilize_frames(frames);
   blend_frames(frames);
   add_black_frames(frames);
+  crop_frames(frames);
 
   namedWindow("output", WINDOW_AUTOSIZE);
   int i = 0; // TODO iterator
