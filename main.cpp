@@ -12,9 +12,15 @@
 using namespace std;
 using namespace cv;
 
-int fps = 15;
+#define RATIO_WIDESCREEN (16.0 / 9)
+
+int fps = 25;
+double ratio = -1;
 int hold = 1; // sec
 double crop = 0.1;
+int lines = 720;
+Size size;
+Size outputSize;
 
 bool add_black_frames(vector<Mat>& frames)
 {
@@ -33,9 +39,8 @@ bool crop_frames(vector<Mat>& frames)
        it = frames.erase(it)) {
     frames0.push_back(*it);
   }
-  Size size = frames0[0].size();
-  int dx = crop * size.width;
-  int dy = crop * size.height;
+  int dx = (size.width - outputSize.width) / 2;
+  int dy = (size.height - outputSize.height) / 2;
   Rect roi(dx, dy, size.width - dx, size.height - dy);
   for (vector<Mat>::iterator it = frames0.begin();
        it != frames0.end();
@@ -226,8 +231,6 @@ frames.push_back(frame);
 int main(int argc, char** argv)
 {
   vector<Mat> frames;
-  int lines = 720;
-  Size size;
 
   // read input
   for (int i = 1; i < argc; i++) {
@@ -238,12 +241,23 @@ int main(int argc, char** argv)
     }
     if (i == 1) {
       Size orgSize = image.size();
-      float ratio = orgSize.width / 1.0 / orgSize.height;
-      size = Size(lines * ratio, lines);
+      float orgRatio = orgSize.width / 1.0 / orgSize.height;
+      if (!(ratio > 0)) {
+        ratio = orgRatio;
+      }
+      outputSize = Size(lines * ratio, lines);
+      if (orgRatio > ratio) {
+        size.width = (1.0 + crop) * outputSize.width * orgRatio;
+        size.height = (1.0 + crop) * outputSize.width;
+      } else {
+        size.width = (1.0 + crop) * outputSize.width;
+        size.height = (1.0 + crop) * outputSize.width / orgRatio;
+      }
+      size.width += size.width % 2;
+      size.height += size.height % 2;
       cout << "Input size: " << orgSize << endl;
-      cout << "Output size: " << size << endl;
-      size.width = (1.0 + crop) * size.width;
-      size.height = (1.0 + crop) * size.height;
+      cout << "Process size: " << size << endl;
+      cout << "Output size: " << outputSize << endl;
     }
     Mat frame;
     resize(image, frame, size);
@@ -272,14 +286,13 @@ int main(int argc, char** argv)
     }
   }
 
-  /*
   // write output
-  VideoWriter video("out.avi", CV_FOURCC('X','V','I','D'), fps, size, true);
+  VideoWriter video("out.avi", CV_FOURCC('P','I','M','1'), fps, outputSize, true);
   for (vector<Mat>::iterator it = frames.begin();
        it != frames.end();
-       it = frames.erase(it)) {
+       it++) {
     video.write(*it);
-  }*/
+  }
 
   return 0;
 }
