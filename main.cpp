@@ -144,7 +144,7 @@ frames.push_back(frames0[0]);
 //-- Step 1: Detect the keypoints using SURF Detector
   int minHessian = 400;
 
-  SurfFeatureDetector detector( minHessian , 8, 3, true, true ); // ???
+  SurfFeatureDetector detector( minHessian , 4, 2, true, true ); // ???
 
   std::vector<KeyPoint> keypoints_object, keypoints_scene;
 
@@ -287,7 +287,7 @@ int main(int argc, char** argv)
   }
 
   // write output
-  VideoWriter video("out.avi", CV_FOURCC('P','I','M','1'), fps, outputSize, true);
+  VideoWriter video("out.avi", CV_FOURCC('M','J','P','G')/*CV_FOURCC('X','2','6','4')*/, fps, outputSize, true);
   for (vector<Mat>::iterator it = frames.begin();
        it != frames.end();
        it++) {
