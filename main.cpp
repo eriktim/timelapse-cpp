@@ -190,7 +190,7 @@ frames.push_back(frames0[0]);
                good_matches, img_matches, Scalar::all(-1), Scalar::all(-1),
                vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS );
   ostringstream oss1;
-  oss1 << "/tmp/timelapse/mat_" << ii << ".jpg";
+  oss1 << "/tmp/timelapse/match_" << ii << ".jpg";
   imwrite(oss1.str(), img_matches); 
 
   //-- Localize the object
@@ -212,6 +212,7 @@ frames.push_back(frames0[0]);
   double theta = 3.0;
   if (fabs(det) > theta || theta * fabs(det) < 1.0) {
     cout << "Singular matrix!" << endl;
+    H = Mat::eye(H.size(), H.type());
   }
 
   Mat frame;
@@ -287,11 +288,20 @@ int main(int argc, char** argv)
   }
 
   // write output
-  VideoWriter video("out.avi", CV_FOURCC('M','J','P','G')/*CV_FOURCC('X','2','6','4')*/, fps, outputSize, true);
-  for (vector<Mat>::iterator it = frames.begin();
-       it != frames.end();
-       it++) {
-    video.write(*it);
+  VideoWriter video("out.avi", CV_FOURCC('X','V','I','D'), fps, frames[0].size()/*outputSize*/, true);
+  int iii = 0;
+  //for (vector<Mat>::iterator it = frames.begin();
+  //     it != frames.end();
+  //     it++) {
+  while (iii < frames.size()) {
+    //video.write(*it);
+    video.write(frames[iii++]);
+    //ostringstream oss2;
+    //oss2 << "/tmp/timelapse/out_" << iii << ".jpg";
+    //cout << oss2.str() << endl;
+    //if (!imwrite(oss2.str(), frames[iii++])) {
+    //  cout << "Faied writing " << (iii - 1) << "!" << endl;
+    //}
   }
 
   return 0;
