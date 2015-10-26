@@ -1,308 +1,230 @@
-#include <algorithm>
-#include <iterator>
+#include <iostream>
 #include <stdio.h>
-#include <utility>
-#include "opencv2/opencv.hpp"
-#include "opencv2/core/core.hpp"
-#include "opencv2/features2d/features2d.hpp"
-#include "opencv2/nonfree/features2d.hpp"
-#include "opencv2/highgui/highgui.hpp"
-#include "opencv2/nonfree/nonfree.hpp"
+#include "opencv2/core.hpp"
+#include "opencv2/core/utility.hpp"
+#include "opencv2/core/ocl.hpp"
+#include "opencv2/imgcodecs.hpp"
+#include "opencv2/highgui.hpp"
+#include "opencv2/features2d.hpp"
+#include "opencv2/calib3d.hpp"
+#include "opencv2/imgproc.hpp"
+#include "opencv2/xfeatures2d.hpp"
 
-using namespace std;
 using namespace cv;
+using namespace cv::xfeatures2d;
 
-#define RATIO_WIDESCREEN (16.0 / 9)
+const int LOOP_NUM = 10;
+const int GOOD_PTS_MAX = 50;
+const float GOOD_PORTION = 0.15f;
 
-int fps = 25;
-double ratio = -1;
-int hold = 1; // sec
-double crop = 0.1;
-int lines = 720;
-Size size;
-Size outputSize;
+int64 work_begin = 0;
+int64 work_end = 0;
 
-bool add_black_frames(vector<Mat>& frames)
+static void workBegin()
 {
-  Mat black(frames[0].size(), CV_8UC3, Scalar(0,0,0));
-  for (int k = 0; k < fps; k++) {
-    frames.push_back(black);
-  }
+    work_begin = getTickCount();
 }
 
-bool crop_frames(vector<Mat>& frames)
+static void workEnd()
 {
-  vector<Mat> frames0; // TODO method
-  frames0.reserve(frames.size());
-  for (vector<Mat>::iterator it = frames.begin();
-       it != frames.end();
-       it = frames.erase(it)) {
-    frames0.push_back(*it);
-  }
-  int dx = (size.width - outputSize.width) / 2;
-  int dy = (size.height - outputSize.height) / 2;
-  Rect roi(dx, dy, size.width - dx, size.height - dy);
-  for (vector<Mat>::iterator it = frames0.begin();
-       it != frames0.end();
-       it++) {
-    Mat frame = *it;
-    frames.push_back(frame(roi));
-  }
+    work_end = getTickCount() - work_begin;
 }
 
-bool blend_frames(vector<Mat>& frames)
+static double getTime()
 {
-  vector<Mat> frames0; // TODO method
-  frames0.reserve(frames.size() + 2);
-  Mat black(frames[0].size(), CV_8UC3, Scalar(0,0,0));
-  frames0.push_back(black);
-  for (vector<Mat>::iterator it = frames.begin();
-       it != frames.end();
-       it = frames.erase(it)) {
-    frames0.push_back(*it);
-  }
-  frames0.push_back(black);
-  for (int i = 1; i < frames0.size(); i++) {
-    for (int k = 0; k < 3 * fps; k++) {
-      float alpha = k / 3.0 / fps;
-      Mat frame;
-      addWeighted(frames0[i], alpha, frames0[i - 1], 1.0 - alpha, 0.0, frame);
-      frames.push_back(frame);
-    }
-    for (int j = 1; j < fps * hold; j++) {
-      frames.push_back(frames0[i]);
-    }
-  }
+    return work_end /((double)getTickFrequency() )* 1000.;
 }
 
-void normalize_frames(vector<Mat>& frames)
+struct SURFDetector
 {
-  vector<Mat> frames0; // TODO method
-  frames0.reserve(frames.size());
-  for (vector<Mat>::iterator it = frames.begin();
-       it != frames.end();
-       it = frames.erase(it)) {
-    frames0.push_back(*it);
-  }
-
-    vector<Scalar> deflickerBufferMean(frames.size());
-    vector<Scalar> deflickerBufferStd(frames.size());
-    
-  for (int ii = 0; ii < frames0.size(); ii++) {
-    meanStdDev(frames0[ii], deflickerBufferMean[ii], deflickerBufferStd[ii]);
-
-    Scalar evCorrection;
-    Scalar contrastCorrection;
-
-    Scalar bufferAvg = 0;
-    Scalar bufferStdAvg = 0;
-
-    for(int i = 0; i < frames0.size(); i++) {
-       bufferAvg += deflickerBufferMean[i]/Scalar(frames0.size());
-       bufferStdAvg += deflickerBufferStd[i]/Scalar(frames0.size());
-    }
-
-    Mat doubleImg;
-    frames0[ii].convertTo(doubleImg, CV_64FC3);
-    vector<Mat> channels;
-    split(doubleImg, channels);
-
-    for(int ch = 0; ch < frames0[ii].channels(); ch++)
+    Ptr<Feature2D> surf;
+    SURFDetector(double hessian = 800.0)
     {
-        channels[ch] = ((channels[ch] - deflickerBufferMean[ii][ch])/deflickerBufferStd[ii][ch])
-                * contrastCorrection[ch] + evCorrection[ch];
+        surf = SURF::create(hessian);
     }
-    merge(channels, doubleImg);
+    template<class T>
+    void operator()(const T& in, const T& mask, std::vector<cv::KeyPoint>& pts, T& descriptors, bool useProvided = false)
+    {
+        surf->detectAndCompute(in, mask, pts, descriptors, useProvided);
+    }
+};
 
-    Mat frame;
-    doubleImg.convertTo(frame, CV_8UC3);
-    frames.push_back(frame);
-  }
+template<class KPMatcher>
+struct SURFMatcher
+{
+    KPMatcher matcher;
+    template<class T>
+    void match(const T& in1, const T& in2, std::vector<cv::DMatch>& matches)
+    {
+        matcher.match(in1, in2, matches);
+    }
+};
+
+static Mat drawGoodMatches(
+    const Mat& img1,
+    const Mat& img2,
+    const std::vector<KeyPoint>& keypoints1,
+    const std::vector<KeyPoint>& keypoints2,
+    std::vector<DMatch>& matches,
+    std::vector<Point2f>& scene_corners_
+    )
+{
+    //-- Sort matches and preserve top 10% matches
+    std::sort(matches.begin(), matches.end());
+    std::vector< DMatch > good_matches;
+    double minDist = matches.front().distance;
+    double maxDist = matches.back().distance;
+
+    const int ptsPairs = std::min(GOOD_PTS_MAX, (int)(matches.size() * GOOD_PORTION));
+    for( int i = 0; i < ptsPairs; i++ )
+    {
+        good_matches.push_back( matches[i] );
+    }
+    std::cout << "\nMax distance: " << maxDist << std::endl;
+    std::cout << "Min distance: " << minDist << std::endl;
+
+    std::cout << "Calculating homography using " << ptsPairs << " point pairs." << std::endl;
+
+    // drawing the results
+    Mat img_matches;
+
+    drawMatches( img1, keypoints1, img2, keypoints2,
+                 good_matches, img_matches, Scalar::all(-1), Scalar::all(-1),
+                 std::vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS  );
+
+    //-- Localize the object
+    std::vector<Point2f> obj;
+    std::vector<Point2f> scene;
+
+    for( size_t i = 0; i < good_matches.size(); i++ )
+    {
+        //-- Get the keypoints from the good matches
+        obj.push_back( keypoints1[ good_matches[i].queryIdx ].pt );
+        scene.push_back( keypoints2[ good_matches[i].trainIdx ].pt );
+    }
+    //-- Get the corners from the image_1 ( the object to be "detected" )
+    std::vector<Point2f> obj_corners(4);
+    obj_corners[0] = Point(0,0);
+    obj_corners[1] = Point( img1.cols, 0 );
+    obj_corners[2] = Point( img1.cols, img1.rows );
+    obj_corners[3] = Point( 0, img1.rows );
+    std::vector<Point2f> scene_corners(4);
+
+    Mat H = findHomography( obj, scene, RANSAC );
+    perspectiveTransform( obj_corners, scene_corners, H);
+
+    Mat out;
+    warpPerspective(img1, out, H, img1.size(), INTER_CUBIC);
+    imwrite("SURF_image2.png", img2);
+    imwrite("SURF_warped.png", out);
+
+    scene_corners_ = scene_corners;
+
+    //-- Draw lines between the corners (the mapped object in the scene - image_2 )
+    line( img_matches,
+          scene_corners[0] + Point2f( (float)img1.cols, 0), scene_corners[1] + Point2f( (float)img1.cols, 0),
+          Scalar( 0, 255, 0), 2, LINE_AA );
+    line( img_matches,
+          scene_corners[1] + Point2f( (float)img1.cols, 0), scene_corners[2] + Point2f( (float)img1.cols, 0),
+          Scalar( 0, 255, 0), 2, LINE_AA );
+    line( img_matches,
+          scene_corners[2] + Point2f( (float)img1.cols, 0), scene_corners[3] + Point2f( (float)img1.cols, 0),
+          Scalar( 0, 255, 0), 2, LINE_AA );
+    line( img_matches,
+          scene_corners[3] + Point2f( (float)img1.cols, 0), scene_corners[0] + Point2f( (float)img1.cols, 0),
+          Scalar( 0, 255, 0), 2, LINE_AA );
+    return img_matches;
 }
 
-bool stabilize_frames(vector<Mat>& frames)
+////////////////////////////////////////////////////
+// This program demonstrates the usage of SURF_OCL.
+// use cpu findHomography interface to calculate the transformation matrix
+int main(int argc, char* argv[])
 {
-  vector<Mat> frames0; // TODO method
-  vector<Mat> grayscales;
-  frames0.reserve(frames.size());
-  for (vector<Mat>::iterator it = frames.begin();
-       it != frames.end();
-       it = frames.erase(it)) {
-    frames0.push_back(*it);
-    Mat gray;
-    cvtColor(*it, gray, CV_BGR2GRAY);
-    grayscales.push_back(gray);
-  }
-  SurfFeatureDetector detector(400);
-  SurfDescriptorExtractor extractor;
-frames.push_back(frames0[0]);
-  for (int ii = 1; ii < frames0.size(); ii++) {
-    Mat img_object = grayscales[ii];
-    Mat img_scene;
-    cvtColor(frames[ii - 1], img_scene, CV_BGR2GRAY);
-////////////////////
-//-- Step 1: Detect the keypoints using SURF Detector
-  int minHessian = 400;
+    const char* keys =
+        "{ h help     | false            | print help message  }"
+        "{ l left     | box.png          | specify left image  }"
+        "{ r right    | box_in_scene.png | specify right image }"
+        "{ o output   | SURF_output.jpg  | specify output save path }"
+        "{ m cpu_mode | false            | run without OpenCL }";
 
-  SurfFeatureDetector detector( minHessian , 4, 2, true, true ); // ???
-
-  std::vector<KeyPoint> keypoints_object, keypoints_scene;
-
-  detector.detect( img_object, keypoints_object );
-  detector.detect( img_scene, keypoints_scene );
-
-  //-- Step 2: Calculate descriptors (feature vectors)
-  SurfDescriptorExtractor extractor;
-
-  Mat descriptors_object, descriptors_scene;
-
-  extractor.compute( img_object, keypoints_object, descriptors_object );
-  extractor.compute( img_scene, keypoints_scene, descriptors_scene );
-
-  //-- Step 3: Matching descriptor vectors using FLANN matcher
-  FlannBasedMatcher matcher;
-  std::vector< DMatch > matches;
-  matcher.match( descriptors_object, descriptors_scene, matches );
-
-  double max_dist = 0; double min_dist = 100;
-
-  //-- Quick calculation of max and min distances between keypoints
-  for( int i = 0; i < descriptors_object.rows; i++ )
-  { double dist = matches[i].distance;
-    if( dist < min_dist ) min_dist = dist;
-    if( dist > max_dist ) max_dist = dist;
-  }
-
-  //printf("-- Max dist : %f \n", max_dist );
-  //printf("-- Min dist : %f \n", min_dist );
-
-  //-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
-  std::vector< DMatch > good_matches;
-
-  for( int i = 0; i < descriptors_object.rows; i++ ) { 
-    if( matches[i].distance < 3*min_dist ) {
-      good_matches.push_back( matches[i]);
+    CommandLineParser cmd(argc, argv, keys);
+    if (cmd.has("help"))
+    {
+        std::cout << "Usage: surf_matcher [options]" << std::endl;
+        std::cout << "Available options:" << std::endl;
+        cmd.printMessage();
+        return EXIT_SUCCESS;
     }
-  }
-
-  Mat img_matches;
-  drawMatches( img_object, keypoints_object, img_scene, keypoints_scene,
-               good_matches, img_matches, Scalar::all(-1), Scalar::all(-1),
-               vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS );
-  ostringstream oss1;
-  oss1 << "/tmp/timelapse/match_" << ii << ".jpg";
-  imwrite(oss1.str(), img_matches); 
-
-  //-- Localize the object
-  std::vector<Point2f> obj;
-  std::vector<Point2f> scene;
-
-  for( int i = 0; i < good_matches.size(); i++ )
-  {
-    //-- Get the keypoints from the good matches
-    obj.push_back( keypoints_object[ good_matches[i].queryIdx ].pt );
-    scene.push_back( keypoints_scene[ good_matches[i].trainIdx ].pt );
-  }
-
-  Mat H = findHomography( obj, scene, CV_RANSAC , 2);
-  //Mat H = estimateRigidTransform(obj, scene, 0);
-  cout << H << endl;
-
-  double det = H.at<double>(0,0) * H.at<double>(1,1) - H.at<double>(1,0) * H.at<double>(0,1);
-  double theta = 3.0;
-  if (fabs(det) > theta || theta * fabs(det) < 1.0) {
-    cout << "Singular matrix!" << endl;
-    H = Mat::eye(H.size(), H.type());
-  }
-
-  Mat frame;
-  warpPerspective( frames0[ii] , frame, H, frames0[ii].size(), INTER_CUBIC);
-  //warpAffine(frames0[ii] , frame, H, frames0[ii].size(), INTER_CUBIC);
-  // write stabilized frames
-  ostringstream oss;
-  oss << "/tmp/timelapse/" << ii << ".jpg";
-  imwrite(oss.str(), frame); 
-
-////////////////////
-//frames.push_back(img_matches);
-frames.push_back(frame);
-  }
-}
-
-int main(int argc, char** argv)
-{
-  vector<Mat> frames;
-
-  // read input
-  for (int i = 1; i < argc; i++) {
-    Mat image = imread(argv[i], CV_LOAD_IMAGE_COLOR);
-    if (!image.data) {
-      cerr << "Ignoring image " << i << endl;
-      continue;
+    if (cmd.has("cpu_mode"))
+    {
+        ocl::setUseOpenCL(false);
+        std::cout << "OpenCL was disabled" << std::endl;
     }
-    if (i == 1) {
-      Size orgSize = image.size();
-      float orgRatio = orgSize.width / 1.0 / orgSize.height;
-      if (!(ratio > 0)) {
-        ratio = orgRatio;
-      }
-      outputSize = Size(lines * ratio, lines);
-      if (orgRatio > ratio) {
-        size.width = (1.0 + crop) * outputSize.width * orgRatio;
-        size.height = (1.0 + crop) * outputSize.width;
-      } else {
-        size.width = (1.0 + crop) * outputSize.width;
-        size.height = (1.0 + crop) * outputSize.width / orgRatio;
-      }
-      size.width += size.width % 2;
-      size.height += size.height % 2;
-      cout << "Input size: " << orgSize << endl;
-      cout << "Process size: " << size << endl;
-      cout << "Output size: " << outputSize << endl;
+
+    UMat img1, img2;
+
+    std::string outpath = cmd.get<std::string>("o");
+
+    std::string leftName = cmd.get<std::string>("l");
+    imread(leftName, IMREAD_GRAYSCALE).copyTo(img1);
+    if(img1.empty())
+    {
+        std::cout << "Couldn't load " << leftName << std::endl;
+        cmd.printMessage();
+        return EXIT_FAILURE;
     }
-    Mat frame;
-    resize(image, frame, size);
-    frames.push_back(frame);
-  }
 
-  //normalize_frames(frames);
-  stabilize_frames(frames);
-  blend_frames(frames);
-  add_black_frames(frames);
-  crop_frames(frames);
-
-  namedWindow("output", WINDOW_AUTOSIZE);
-  int i = 0; // TODO iterator
-  cout << "Looping " << frames.size() << " frames" << endl;
-
-  // show output
-  while (true) {
-    imshow("output", frames[i]);
-    if (waitKey(1000 / fps) >= 0) {
-      break;
+    std::string rightName = cmd.get<std::string>("r");
+    imread(rightName, IMREAD_GRAYSCALE).copyTo(img2);
+    if(img2.empty())
+    {
+        std::cout << "Couldn't load " << rightName << std::endl;
+        cmd.printMessage();
+        return EXIT_FAILURE;
     }
-    i++;
-    if (i >= frames.size()) {
-      i = 0;
+
+    double surf_time = 0.;
+
+    //declare input/output
+    std::vector<KeyPoint> keypoints1, keypoints2;
+    std::vector<DMatch> matches;
+
+    UMat _descriptors1, _descriptors2;
+    Mat descriptors1 = _descriptors1.getMat(ACCESS_RW),
+        descriptors2 = _descriptors2.getMat(ACCESS_RW);
+
+    //instantiate detectors/matchers
+    SURFDetector surf;
+
+    SURFMatcher<BFMatcher> matcher;
+
+    //-- start of timing section
+
+    for (int i = 0; i <= LOOP_NUM; i++)
+    {
+        if(i == 1) workBegin();
+        surf(img1.getMat(ACCESS_READ), Mat(), keypoints1, descriptors1);
+        surf(img2.getMat(ACCESS_READ), Mat(), keypoints2, descriptors2);
+        matcher.match(descriptors1, descriptors2, matches);
     }
-  }
+    workEnd();
+    std::cout << "FOUND " << keypoints1.size() << " keypoints on first image" << std::endl;
+    std::cout << "FOUND " << keypoints2.size() << " keypoints on second image" << std::endl;
 
-  // write output
-  VideoWriter video("out.avi", CV_FOURCC('X','V','I','D'), fps, frames[0].size()/*outputSize*/, true);
-  int iii = 0;
-  //for (vector<Mat>::iterator it = frames.begin();
-  //     it != frames.end();
-  //     it++) {
-  while (iii < frames.size()) {
-    //video.write(*it);
-    video.write(frames[iii++]);
-    //ostringstream oss2;
-    //oss2 << "/tmp/timelapse/out_" << iii << ".jpg";
-    //cout << oss2.str() << endl;
-    //if (!imwrite(oss2.str(), frames[iii++])) {
-    //  cout << "Faied writing " << (iii - 1) << "!" << endl;
-    //}
-  }
+    surf_time = getTime();
+    std::cout << "SURF run time: " << surf_time / LOOP_NUM << " ms" << std::endl<<"\n";
 
-  return 0;
+
+    std::vector<Point2f> corner;
+    Mat img_matches = drawGoodMatches(img1.getMat(ACCESS_READ), img2.getMat(ACCESS_READ), keypoints1, keypoints2, matches, corner);
+
+    //-- Show detected matches
+
+    namedWindow("surf matches", 0);
+    imshow("surf matches", img_matches);
+    imwrite(outpath, img_matches);
+
+    waitKey(0);
+    return EXIT_SUCCESS;
 }
