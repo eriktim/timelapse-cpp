@@ -4,8 +4,8 @@ LIBS = `pkg-config --libs opencv`
 all: main.cpp
 	g++ $(CFLAGS) $(LIBS) -o $@ $<
 
-line: line.cpp
+new: new.cpp
 	g++ $(CFLAGS) $(LIBS) -o $@ $<
 
-main3: main3.cpp
+man: man.cpp
 	g++ $(CFLAGS) $(LIBS) -o $@ $<
