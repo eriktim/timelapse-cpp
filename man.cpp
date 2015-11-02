@@ -30,7 +30,7 @@ bool add_black_frames(vector<Mat>& frames)
   }
 }
 
-bool crop_frames(vector<Mat>& frames)
+bool crop_frames(vector<Mat>& frames, int dl, int dr, int dt, int db)
 {
   vector<Mat> frames0; // TODO method
   frames0.reserve(frames.size());
@@ -39,9 +39,39 @@ bool crop_frames(vector<Mat>& frames)
        it = frames.erase(it)) {
     frames0.push_back(*it);
   }
-  int dx = (size.width - outputSize.width) / 2;
-  int dy = (size.height - outputSize.height) / 2;
-  Rect roi(dx, dy, size.width - dx, size.height - dy);
+  Size orgSize = frames0[0].size();
+cout << dl <<" "<< dr <<" "<< dt<<" " << db << endl; 
+  float ratio = orgSize.width / 1.0 / orgSize.height;
+  float newRatio = (orgSize.width - dl - dr) / 1.0 / (orgSize.height - dt - db);
+cout << ratio << " " << newRatio << endl;
+  if (newRatio > ratio) {
+    int dy = (dt + db) * ratio;
+cout << "dy " << dy << endl;
+    if (dt > dy / 2.0) {
+      dt = dt + (dy - dt) / 2.0;
+      db = dy - dt;
+    } else if (db > dy / 2.0) {
+      db = db + (dy - db) / 2.0;
+      dt = dy - db;
+    } else {
+      db = dt = dy / 2.0;
+    }
+  } else {
+    int dx = (dl + dr) * ratio;
+cout << "dx " << dx << endl;
+    if (dl > dx / 2.0) {
+      dl = dl + (dx - dl) / 2.0;
+      dr = dx - dl;
+    } else if (dr > dx / 2.0) {
+      dr = dr + (dx - dr) / 2.0;
+      dl = dx - dr;
+    } else {
+      dl = dr = dx / 2.0;
+    }
+  }
+cout << dl <<" "<< dr <<" "<< dt<<" " << db << endl; 
+  Rect roi(dl, dt, orgSize.width - dr - dl, orgSize.height - db - dt);
+cout << roi << " " << orgSize << endl;
   for (vector<Mat>::iterator it = frames0.begin();
        it != frames0.end();
        it++) {
@@ -62,9 +92,10 @@ bool blend_frames(vector<Mat>& frames)
     frames0.push_back(*it);
   }
   frames0.push_back(black);
+  float duration = 2.0;
   for (int i = 1; i < frames0.size(); i++) {
-    for (int k = 0; k < fps; k++) {
-      float alpha = k / 1.0 / fps;
+    for (int k = 0; k < duration * fps; k++) {
+      float alpha = k / 1.0 / duration / fps;
       Mat frame;
       addWeighted(frames0[i], alpha, frames0[i - 1], 1.0 - alpha, 0.0, frame);
       frames.push_back(frame);
@@ -94,15 +125,19 @@ int toInt(string str) {
 int main(int argc, char** argv)
 {
   vector<Mat> frames;
+  map<string, Mat> transformations;
   ifstream config("METADATA_F.txt");
   if (!config.is_open()) {
     cerr << "Failed opening config file" << endl;
   }
 
   // read input
+  string firstImage;
   string line;
   string prefix;
   Size orgSize;
+  vector<Point2f> originalCorners;
+  float marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0;
 
   while (getline(config, line)) {
     cout << "Parsing " << line << endl;
@@ -115,7 +150,18 @@ int main(int argc, char** argv)
       size.height = orgSize.height;
       outputSize.width = orgSize.width;
       outputSize.height = orgSize.height;
+      originalCorners.push_back(Point2f(0, 0));
+      originalCorners.push_back(Point2f(0, orgSize.height));
+      originalCorners.push_back(Point2f(orgSize.width, orgSize.height));
+      originalCorners.push_back(Point2f(orgSize.width, 0));
       continue;
+    }
+    if (!frames.size()) {
+      firstImage = p[0];
+      Mat image1 = imread(prefix + p[0], CV_LOAD_IMAGE_COLOR);
+      cout << image1.size() << endl;
+      cout << "Adding " << p[0] << endl;
+      frames.push_back(image1);
     }
     Mat image2 = imread(prefix + p[1], CV_LOAD_IMAGE_COLOR);
     cout << "Images " << prefix << "{" << p[0] << "," << p[1] << "}" << endl;
@@ -149,7 +195,40 @@ int main(int argc, char** argv)
 
     Mat warped;
     Mat H = getAffineTransform(B, A);
+    if (p[0] != firstImage) {
+      map<string, Mat>::const_iterator it = transformations.find(p[0]);
+      if (it != transformations.end()) {
+        Mat T = it->second;
+        Mat t = Mat::zeros(3, 3, T.type());
+        Mat h = Mat::zeros(3, 3, H.type());
+        for (int m = 0; m < 2; m++) {
+          for (int n = 0; n < 3; n++) {
+            t.at<double>(m, n) = T.at<double>(m, n);
+            h.at<double>(m, n) = H.at<double>(m, n);
+          }
+        }
+        t.at<double>(2, 2) = 1.0;
+        h.at<double>(2, 2) = 1.0;
+        Mat ht = h * t;
+        for (int m = 0; m < 2; m++) {
+          for (int n = 0; n < 3; n++) {
+            H.at<double>(m, n) = ht.at<double>(m, n);
+          }
+        }
+      } else {
+        cerr << "No transformation known for " << p[0] << endl;
+        exit(1);
+      }
+    }
+
     warpAffine(image2, warped, H, size, INTER_CUBIC);
+    transformations.insert(pair<string, Mat>(p[1], H));
+    vector<Point2f> corners;
+    transform(originalCorners, corners, H);
+    marginLeft = max(marginLeft, max(corners[0].x, corners[1].x)); 
+    marginRight = max(marginRight, orgSize.width - max(corners[2].x, corners[3].x)); 
+    marginTop = max(marginTop, max(corners[0].y, corners[3].y)); 
+    marginBottom = max(marginBottom, orgSize.height - max(corners[2].y, corners[1].y)); 
 
     //circle(warped, A[0], 20, Scalar(0,255,0), 5, CV_AA);
     //circle(warped, A[1], 20, Scalar(0,255,0), 5, CV_AA);
@@ -177,16 +256,12 @@ int main(int argc, char** argv)
     //Mat frame;
     //resize(image, frame, size);
     //frames.push_back(frame);
-    if (!frames.size()) {
-      Mat image1 = imread(prefix + p[0], CV_LOAD_IMAGE_COLOR);
-      cout << image1.size() << endl;
-      cout << "Adding " << p[0] << endl;
-      frames.push_back(image1);
-    }
     cout << "Adding " << p[1] << endl;
     frames.push_back(warped);
   }
   cout << "Finished stabilization" << endl;
+
+  crop_frames(frames, marginLeft, marginRight, marginTop, marginBottom);
 
   vector<Mat> frames2;
   Size videoSize(800, 600);
@@ -200,7 +275,6 @@ int main(int argc, char** argv)
   blend_frames(frames2);
   cout << "Finished blending" << endl;
   add_black_frames(frames2);
-  //crop_frames(frames);
 
   /*namedWindow("output", WINDOW_AUTOSIZE);
   int i = 0; // TODO iterator
@@ -231,12 +305,11 @@ int main(int argc, char** argv)
   while (iii < frames2.size()) {
     //video.write(*it);
     video.write(frames2[iii++]);
-    //ostringstream oss2;
-    //oss2 << "/tmp/timelapse/out_" << iii << ".jpg";
-    //cout << oss2.str() << endl;
-    //if (!imwrite(oss2.str(), frames[iii++])) {
-    //  cout << "Faied writing " << (iii - 1) << "!" << endl;
-    //}
+  }
+  for (int i = 0; i < frames.size(); i++) {
+    ostringstream oss;
+    oss << "stable_" << i << ".jpg";
+    imwrite(oss.str(), frames[i]);
   }
 
   config.close();

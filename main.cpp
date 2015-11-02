@@ -10,6 +10,8 @@
 #include "opencv2/imgproc.hpp"
 #include "opencv2/xfeatures2d.hpp"
 
+#define RATIO_WIDESCREEN (16.0 / 9)
+
 using namespace cv;
 using namespace cv::xfeatures2d;
 
@@ -17,33 +19,26 @@ const int LOOP_NUM = 10;
 const int GOOD_PTS_MAX = 50;
 const float GOOD_PORTION = 0.15f;
 
+int fps = 25;
+double ratio = -1;
+int hold = 1; // sec
+double crop = 0.1;
+int lines = 720;
+Size size;
+Size outputSize;
+
 int64 work_begin = 0;
 int64 work_end = 0;
-
-static void workBegin()
-{
-    work_begin = getTickCount();
-}
-
-static void workEnd()
-{
-    work_end = getTickCount() - work_begin;
-}
-
-static double getTime()
-{
-    return work_end /((double)getTickFrequency() )* 1000.;
-}
 
 struct SURFDetector
 {
     Ptr<Feature2D> surf;
-    SURFDetector(double hessian = 800.0)
+    SURFDetector(double hessian = 400.0)
     {
         surf = SURF::create(hessian);
     }
     template<class T>
-    void operator()(const T& in, const T& mask, std::vector<cv::KeyPoint>& pts, T& descriptors, bool useProvided = false)
+    void operator()(const T& in, const T& mask, std::vector<KeyPoint>& pts, T& descriptors, bool useProvided = false)
     {
         surf->detectAndCompute(in, mask, pts, descriptors, useProvided);
     }
@@ -54,7 +49,7 @@ struct SURFMatcher
 {
     KPMatcher matcher;
     template<class T>
-    void match(const T& in1, const T& in2, std::vector<cv::DMatch>& matches)
+    void match(const T& in1, const T& in2, std::vector<DMatch>& matches)
     {
         matcher.match(in1, in2, matches);
     }
@@ -66,7 +61,8 @@ static Mat drawGoodMatches(
     const std::vector<KeyPoint>& keypoints1,
     const std::vector<KeyPoint>& keypoints2,
     std::vector<DMatch>& matches,
-    std::vector<Point2f>& scene_corners_
+    std::vector<Point2f>& scene_corners_,
+    Mat& H
     )
 {
     //-- Sort matches and preserve top 10% matches
@@ -110,13 +106,8 @@ static Mat drawGoodMatches(
     obj_corners[3] = Point( 0, img1.rows );
     std::vector<Point2f> scene_corners(4);
 
-    Mat H = findHomography( obj, scene, RANSAC );
+    H = findHomography( obj, scene, RANSAC );
     perspectiveTransform( obj_corners, scene_corners, H);
-
-    Mat out;
-    warpPerspective(img1, out, H, img1.size(), INTER_CUBIC);
-    imwrite("SURF_image2.png", img2);
-    imwrite("SURF_warped.png", out);
 
     scene_corners_ = scene_corners;
 
@@ -141,48 +132,39 @@ static Mat drawGoodMatches(
 // use cpu findHomography interface to calculate the transformation matrix
 int main(int argc, char* argv[])
 {
-    const char* keys =
-        "{ h help     | false            | print help message  }"
-        "{ l left     | box.png          | specify left image  }"
-        "{ r right    | box_in_scene.png | specify right image }"
-        "{ o output   | SURF_output.jpg  | specify output save path }"
-        "{ m cpu_mode | false            | run without OpenCL }";
+  std::vector<Mat> frames;
 
-    CommandLineParser cmd(argc, argv, keys);
-    if (cmd.has("help"))
-    {
-        std::cout << "Usage: surf_matcher [options]" << std::endl;
-        std::cout << "Available options:" << std::endl;
-        cmd.printMessage();
-        return EXIT_SUCCESS;
+  // read input
+  for (int i = 1; i < argc; i++) {
+    Mat image = imread(argv[i], CV_LOAD_IMAGE_COLOR);
+    if (!image.data) {
+      std::cerr << "Ignoring image " << i << std::endl;
+      continue;
     }
-    if (cmd.has("cpu_mode"))
-    {
-        ocl::setUseOpenCL(false);
-        std::cout << "OpenCL was disabled" << std::endl;
+    if (i == 1) {
+      Size orgSize = image.size();
+      float orgRatio = orgSize.width / 1.0 / orgSize.height;
+      if (!(ratio > 0)) {
+        ratio = orgRatio;
+      }
+      outputSize = Size(lines * ratio, lines);
+      if (orgRatio > ratio) {
+        size.width = (1.0 + crop) * outputSize.width * orgRatio;
+        size.height = (1.0 + crop) * outputSize.width;
+      } else {
+        size.width = (1.0 + crop) * outputSize.width;
+        size.height = (1.0 + crop) * outputSize.width / orgRatio;
+      }
+      size.width += size.width % 2;
+      size.height += size.height % 2;
+      std::cout << "Input size: " << orgSize << std::endl;
+      std::cout << "Process size: " << size << std::endl;
+      std::cout << "Output size: " << outputSize << std::endl;
     }
-
-    UMat img1, img2;
-
-    std::string outpath = cmd.get<std::string>("o");
-
-    std::string leftName = cmd.get<std::string>("l");
-    imread(leftName, IMREAD_GRAYSCALE).copyTo(img1);
-    if(img1.empty())
-    {
-        std::cout << "Couldn't load " << leftName << std::endl;
-        cmd.printMessage();
-        return EXIT_FAILURE;
-    }
-
-    std::string rightName = cmd.get<std::string>("r");
-    imread(rightName, IMREAD_GRAYSCALE).copyTo(img2);
-    if(img2.empty())
-    {
-        std::cout << "Couldn't load " << rightName << std::endl;
-        cmd.printMessage();
-        return EXIT_FAILURE;
-    }
+    Mat frame;
+    resize(image, frame, size);
+    frames.push_back(image/*frame*/);
+  }
 
     double surf_time = 0.;
 
@@ -198,33 +180,36 @@ int main(int argc, char* argv[])
     SURFDetector surf;
 
     SURFMatcher<BFMatcher> matcher;
+    UMat img1, img2;
 
-    //-- start of timing section
+  for (int k = 1; k < frames.size(); k++) {
+
+    cvtColor(frames[k - 1], img1, CV_BGR2GRAY);
+    cvtColor(frames[k], img2, CV_BGR2GRAY);
 
     for (int i = 0; i <= LOOP_NUM; i++)
     {
-        if(i == 1) workBegin();
         surf(img1.getMat(ACCESS_READ), Mat(), keypoints1, descriptors1);
         surf(img2.getMat(ACCESS_READ), Mat(), keypoints2, descriptors2);
         matcher.match(descriptors1, descriptors2, matches);
     }
-    workEnd();
-    std::cout << "FOUND " << keypoints1.size() << " keypoints on first image" << std::endl;
-    std::cout << "FOUND " << keypoints2.size() << " keypoints on second image" << std::endl;
+    std::cout << "FOUND " << keypoints1.size() << " keypoints on image " << (k - 1) << std::endl;
+    std::cout << "FOUND " << keypoints2.size() << " keypoints on image " << k << std::endl;
 
-    surf_time = getTime();
-    std::cout << "SURF run time: " << surf_time / LOOP_NUM << " ms" << std::endl<<"\n";
-
-
+    Mat H;
     std::vector<Point2f> corner;
-    Mat img_matches = drawGoodMatches(img1.getMat(ACCESS_READ), img2.getMat(ACCESS_READ), keypoints1, keypoints2, matches, corner);
+    Mat img_matches = drawGoodMatches(img1.getMat(ACCESS_READ), img2.getMat(ACCESS_READ), keypoints1, keypoints2, matches, corner, H);
 
-    //-- Show detected matches
+    Mat out;
+    warpPerspective(frames[k - 1], out, H, frames[k].size(), INTER_CUBIC);
 
-    namedWindow("surf matches", 0);
-    imshow("surf matches", img_matches);
-    imwrite(outpath, img_matches);
+    std::ostringstream oss1, oss2;
+    oss1 << "SURF_" << k << "_imag.jpg";
+    oss2 << "SURF_" << k << "_warp.jpg";
+    imwrite(oss1.str(), frames[k]); 
+    imwrite(oss2.str(), out); 
 
-    waitKey(0);
+  }
+
     return EXIT_SUCCESS;
 }
