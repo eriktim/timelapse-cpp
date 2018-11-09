@@ -1,0 +1,6 @@
+cmake_minimum_required( VERSION 3.1.0 )
+project( timelapse )
+find_package( OpenCV REQUIRED COMPONENTS core imgproc highgui imgcodecs calib3d )
+include_directories( ${OpenCV_INCLUDE_DIRS} )
+add_executable( timelapse main.cpp )
+target_link_libraries( timelapse ${OpenCV_LIBS} )

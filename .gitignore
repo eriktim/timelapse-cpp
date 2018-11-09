@@ -1,5 +1,13 @@
+/.vs
+/CMakeFiles
 /testdata
+/x64
+/*.dir/
+/CMakeCache.txt
 *.avi
 *.jpg
 *.o
 *.png
+*.sln
+*.vcxproj*
+cmake_install.cmake
